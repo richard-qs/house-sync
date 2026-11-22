@@ -172,7 +172,68 @@
       </div>
       <div id="panel-spec" class="view-panel document-panel" role="tabpanel" aria-labelledby="tab-spec" hidden><div class="document-heading"><div><h3>Project specification</h3><p>A coordinated technical schedule for your contract documents.</p></div><a data-file="specification_docx" class="secondary-button disabled" aria-disabled="true">Download Word ↓</a></div><article class="spec-sheet"><div class="spec-document-label">DRAFT · CONCEPT DESIGN</div><h3 id="spec-title">My first house</h3><p id="spec-revision" class="spec-revision"></p><div id="spec-content"></div><p class="spec-disclaimer">This draft describes the current concept and selected finishes. Complete construction details, engineering design, statutory requirements, and contract terms require project-specific development and review.</p></article></div>
       <div id="panel-changes" class="view-panel document-panel changes-panel" role="tabpanel" aria-labelledby="tab-changes" hidden>
-        <div class="document-heading"><div><h3>Changes &amp; cost</h3><p>Compare two saved designs and see the estimate difference.</p></div><span class="snapshot-label">SAVED REVISIONS</span></div>
+        <div class="document-heading"><div><h3>Changes &amp; cost</h3><p>Re-price a saved BOQ or compare the cost of two saved designs.</p></div><span class="snapshot-label">SAVED REVISIONS</span></div>
+        <section class="repricing-panel" aria-labelledby="repricing-heading">
+          <h4 id="repricing-heading">Re-price a saved BOQ</h4>
+          <form id="repricing-form" class="repricing-controls">
+            <label class="field">Saved AUD revision<select id="repricing-revision" required><option value="">Loading saved revisions…</option></select></label>
+            <label class="field">Price as at<input id="repricing-date" type="date" required></label>
+            <label class="field">Compare with date <span class="field-note">Leave blank to use saved BOQ rates.</span><input id="repricing-before" type="date"></label>
+            <button id="repricing-submit" class="compare-button" disabled>Re-price and prepare POs</button>
+          </form>
+          <p id="repricing-status" class="comparison-status" role="status">Choose a date to check current costs against the saved BOQ. Values exclude GST.</p>
+          <p id="repricing-error" class="error-message" role="alert" hidden></p>
+          <details id="surcharge-settings" class="repricing-details">
+            <summary>Surcharge history and new surcharges</summary>
+            <p class="field-note">A surcharge applies only to its selected component, from its start date through its end date. Surcharges apply in the order listed.</p>
+            <p id="surcharge-list-status" class="comparison-status" role="status"></p>
+            <ol id="surcharge-list" class="surcharge-list"></ol>
+            <form id="surcharge-form" class="surcharge-controls">
+              <label class="field">Surcharge name<input id="surcharge-name" maxlength="120" required placeholder="e.g. Fuel levy Dec 2026"></label>
+              <label class="field">Effective from<input id="surcharge-from" type="date" required></label>
+              <label class="field">End date (optional)<input id="surcharge-end" type="date"></label>
+              <label class="field">Type<select id="surcharge-type"><option value="percentage">Percentage</option><option value="fixed">Fixed AUD per unit</option></select></label>
+              <label class="field"><span id="surcharge-amount-label">Percentage (%)</span><input id="surcharge-amount" type="number" min="0" step="any" required></label>
+              <label class="field">Component<select id="surcharge-component"><option value="freight">Freight</option><option value="material">Material</option><option value="labour">Labour</option><option value="plant">Plant / equipment</option><option value="base">Unsplit rate</option></select></label>
+              <label class="field">Scope<select id="surcharge-scope"><option value="library">Whole library</option><option value="trade">Trade</option><option value="supplier">Supplier</option><option value="material_category">Material category</option><option value="rate_codes">Rate codes</option></select></label>
+              <label id="surcharge-values-field" class="field" hidden>Scope values (comma-separated)<input id="surcharge-values" disabled></label>
+              <button id="surcharge-submit" class="compare-button">Add surcharge</button>
+            </form>
+            <p id="surcharge-save-status" class="comparison-status" role="status"></p>
+            <p id="surcharge-error" class="error-message" role="alert" hidden></p>
+          </details>
+          <details id="repricing-order-settings" class="repricing-details">
+            <summary>Record purchase order status</summary>
+            <p class="field-note">Record orders already issued or accepted. Re-pricing prepares draft variations for these orders.</p>
+            <form id="repricing-order-form" class="repricing-controls">
+              <label class="field">Saved BOQ item<select id="repricing-order-code" required><option value="">Choose a saved revision</option></select></label>
+              <label class="field">Order status<select id="repricing-order-status" disabled><option value="draft">Draft</option><option value="issued">Issued</option><option value="accepted">Accepted</option></select></label>
+              <button id="repricing-order-submit" class="compare-button" disabled>Save order status</button>
+            </form>
+            <p id="repricing-order-status-note" class="comparison-status" role="status"></p>
+            <p id="repricing-order-error" class="error-message" role="alert" hidden></p>
+          </details>
+          <div id="repricing-result" hidden>
+            <div class="comparison-metrics" aria-label="Re-priced BOQ subtotals excluding GST">
+              <div><span>Old BOQ subtotal</span><strong id="repricing-old">–</strong></div>
+              <div><span>Re-priced BOQ subtotal</span><strong id="repricing-new">–</strong></div>
+              <div><span>Difference excluding GST</span><strong id="repricing-delta">–</strong></div>
+            </div>
+            <div class="table-scroll"><table class="change-table repricing-table"><thead><tr><th scope="col">BOQ item</th><th scope="col">Quantity</th><th scope="col">Old rate</th><th scope="col">New rate</th><th scope="col">Difference</th><th scope="col">Rate changes and surcharges</th></tr></thead><tbody id="repricing-lines"></tbody></table></div>
+            <details class="repricing-details">
+              <summary>Totals by trade and supplier</summary>
+              <div class="table-scroll"><table class="change-table repricing-groups"><thead><tr><th scope="col">Trade</th><th scope="col">Old amount</th><th scope="col">New amount</th><th scope="col">Difference</th></tr></thead><tbody id="repricing-by-trade"></tbody></table></div>
+              <div class="table-scroll"><table class="change-table repricing-groups"><thead><tr><th scope="col">Supplier</th><th scope="col">Old amount</th><th scope="col">New amount</th><th scope="col">Difference</th></tr></thead><tbody id="repricing-by-supplier"></tbody></table></div>
+            </details>
+            <div class="change-report-downloads" aria-label="Download re-pricing report and purchase orders">
+              <div><strong>Re-pricing exports</strong><span id="repricing-order-counts"></span><span id="repricing-order-basis" hidden>PO differences use the amounts from the saved revision.</span></div>
+              <div class="download-links">
+                <a data-reprice-file="xlsx" class="download-link">Excel report</a><a data-reprice-file="csv" class="download-link">CSV report</a><a data-reprice-file="pdf" class="download-link">PDF report</a><a data-reprice-file="purchase_orders" class="download-link">Draft POs and variations (ZIP)</a><a data-reprice-file="client_quote_pdf" class="download-link">Client variation quote PDF</a>
+              </div>
+            </div>
+          </div>
+        </section>
+        <h4 class="compare-designs-heading">Compare saved designs</h4>
         <div class="comparison-controls">
           <label class="field"><span><b>A</b> Before</span><select id="compare-before" aria-label="Revision A before"><option value="">Loading saved revisions...</option></select></label>
           <span class="comparison-arrow" aria-hidden="true">&rarr;</span>

@@ -10,6 +10,8 @@ import hashlib
 import json
 import math
 import threading
+from copy import deepcopy
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
@@ -82,6 +84,56 @@ def _pricing_library(settings: HouseSettings, rate_library: RateLibrary | None =
                 + ", ".join(sorted(missing))
             )
     return library
+
+
+def _dated_rate_fields(library_row: dict, *, override: bool, rate: float, effective_date: str | None) -> dict:
+    fields = {key: deepcopy(library_row[key]) for key in ("trade", "supplier", "material_category")}
+    if override:
+        return {**fields, "rate_components": {"base": rate}, "rate_base_components": {"base": rate},
+                "rate_component_dates": {"base": effective_date}, "surcharges": [], "rate_changes": []}
+    return {**fields, **{key: deepcopy(library_row[key]) for key in (
+        "rate_components", "rate_base_components", "rate_component_dates", "surcharges", "rate_changes",
+    )}}
+
+
+def reprice_boq(result: dict[str, Any], library: RateLibrary, as_at: str | date) -> dict[str, Any]:
+    """Price saved quantities at a new date without changing the design revision."""
+    priced_library = library.as_at(as_at)
+    priced = deepcopy(result)
+    currency = priced["totals"]["currency"]
+    group_totals: dict[str | None, Decimal] = {}
+    settings = priced.get("settings", {})
+    overrides = settings.get("rate_overrides")
+    legacy_rates = settings.get("rates") or {}
+    for row in priced["boq"]:
+        code = row.get("rate_code", row["code"])
+        if code not in priced_library.rows:
+            raise RateLibraryError(f"Saved BOQ line {row['code']} has no known rate code")
+        library_row = priced_library.rows[code]
+        # Saved line facts take precedence over inferred historical overrides.
+        saved_override = code in overrides if overrides is not None else BOQ_CODES[code][1] in legacy_rates
+        origin = row.get("rate_origin")
+        override = origin == "override" if origin in ("library", "override") else saved_override
+        if not override and currency != priced_library.currency:
+            raise RateLibraryError(f"Cannot price {currency} BOQ line {row['code']} with a {priced_library.currency} rate; no currency conversion is applied")
+        rate = row["rate"] if override else library_row["rate"]
+        effective = row.get("rate_effective_date", settings.get("rate_date")) if override else library_row["effective_date"]
+        quantity = row["gross_quantity"] if "gross_quantity" in row else row["quantity"]
+        row.update(
+            rate=rate, amount=_money(Decimal(str(quantity)) * Decimal(str(rate))),
+            rate_origin="override" if override else "library",
+            rate_source=row.get("rate_source", settings.get("rate_source")) if override else library_row["source"],
+            rate_effective_date=effective, library_rate=library_row["rate"], library_currency=priced_library.currency,
+            **_dated_rate_fields(library_row, override=override, rate=rate, effective_date=effective),
+        )
+        group = row.get("group_id")
+        group_totals[group] = group_totals.get(group, Decimal(0)) + Decimal(str(row["amount"]))
+    for group in priced.get("boq_groups", []):
+        group["subtotal"] = _money(group_totals.get(group["id"], Decimal(0)))
+    priced["totals"]["subtotal"] = _money(sum(group_totals.values(), Decimal(0)))
+    priced["price_as_at"] = priced_library.price_as_at
+    priced["rate_library"] = priced_library.snapshot()
+    return priced
 
 
 def _revision(settings: HouseSettings, rate_library: RateLibrary | None = None) -> str:
@@ -347,6 +399,8 @@ def _base_boq(settings: HouseSettings, quantities: dict[str, Any], rate_library:
             "library_rate": library_row["rate"], "library_currency": library.currency,
             "element_ids": element_ids,
         })
+        if library.price_as_at is not None:
+            rows[-1].update(_dated_rate_fields(library_row, override=override, rate=rate, effective_date=rows[-1]["rate_effective_date"]))
         if code == "PAINT":
             rows[-1]["paint_coats"] = settings.paint_coats
     return rows
@@ -436,7 +490,9 @@ def _drawing(ir: IRDocument, rooms: list | None = None, partitions: list | None 
     }
 
 
-def build_house(settings: HouseSettings, output_dir: Path, rate_library: RateLibrary | None = None) -> dict[str, Any]:
+def build_house(
+    settings: HouseSettings, output_dir: Path, rate_library: RateLibrary | None = None, *, price_as_at: str | None = None,
+) -> dict[str, Any]:
     """Compile a validated house and write exports into an isolated directory.
 
     The caller owns generation publication and document export. A lock
@@ -445,6 +501,8 @@ def build_house(settings: HouseSettings, output_dir: Path, rate_library: RateLib
     """
     settings = HouseSettings.model_validate(settings.model_dump(mode="json"))
     library = _pricing_library(settings, rate_library)
+    if price_as_at is not None:
+        library = library.as_at(price_as_at)
     from .layout import derive_layout
 
     layout = derive_layout(settings)
@@ -510,5 +568,7 @@ def build_house(settings: HouseSettings, output_dir: Path, rate_library: RateLib
                                  for clash in ir.clashes if clash.a in wall_ids and clash.b in wall_ids],
             },
         }
+        if library.price_as_at is not None:
+            result["price_as_at"] = library.price_as_at
         (output_dir / "settings.json").write_text(json.dumps(result["settings"], indent=2, ensure_ascii=False), encoding="utf-8")
         return result

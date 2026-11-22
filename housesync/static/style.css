@@ -182,5 +182,26 @@
   white-space: normal;
 }
 
+.repricing-panel { margin: 0 0 24px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+.repricing-panel h4, .compare-designs-heading { font-size: 13px; font-weight: 650; color: #39574a; margin: 0 0 12px; }
+.repricing-controls, .surcharge-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.repricing-controls .field, .surcharge-controls .field { flex: 1 1 135px; margin: 0; }
+.repricing-controls .field:first-child { flex-basis: 210px; }
+.repricing-controls .compare-button, .surcharge-controls .compare-button { grid-column: auto; }
+.repricing-controls input, .repricing-controls select, .surcharge-controls input, .surcharge-controls select { min-height: 37px; }
+.repricing-panel .comparison-status { margin: 10px 0; }
+.repricing-panel .comparison-status:empty, .surcharge-list:empty { display: none; }
+.repricing-details { border-top: 1px solid var(--line); padding: 10px 0; }
+.repricing-details summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #496f5a; }
+.repricing-details .field-note { margin: 8px 0; }
+.surcharge-list { padding-left: 20px; font-size: 11px; color: #52666d; line-height: 1.7; }
+#repricing-result { margin-top: 12px; }
+#repricing-result > .table-scroll { margin-top: 12px; }
+.repricing-table td:last-child, .repricing-table th:last-child { text-align: left; white-space: normal; min-width: 200px; }
+.repricing-table td:last-child { white-space: pre-line; overflow-wrap: anywhere; }
+.repricing-groups { min-width: 420px; margin-top: 8px; }
+.repricing-groups td:first-child, .repricing-groups th:first-child { min-width: 130px; }
+#repricing-result .download-links { flex-wrap: wrap; }
+
 /* Draft purchase orders from the displayed saved BOQ */
 .purchasing-summary{display:flex;align-items:center;flex-wrap:wrap;gap:10px 18px;font-size:10px;color:#738579;margin-bottom:12px}.purchasing-summary strong{font-weight:600;color:#4a6b57}.purchasing-instructions{font-size:11px;line-height:1.8;color:#6a8070;margin:14px 0 20px}.purchasing-empty{font-size:11px;line-height:1.7;background:#f4f8f0;color:#7a8c7b;padding:14px;border-radius:5px;margin:16px 0}.purchasing-table{border-collapse:collapse;width:100%;min-width:780px;font-size:10px;line-height:1.6}.purchasing-table th,.purchasing-table td{padding:12px 9px;border-bottom:1px solid #e3eae1;vertical-align:top;text-align:right;font-variant-numeric:tabular-nums}.purchasing-table th{font-size:9px;font-weight:600;color:#6c8271;background:#f2f6ef}.purchasing-table th:first-child,.purchasing-table td:first-child{text-align:left;min-width:230px;max-width:420px}.purchasing-table td:not(:first-child){white-space:nowrap}.purchasing-table td:first-child strong{color:#476a53;font-size:10px}.purchasing-table td p{margin-top:5px;line-height:1.7}.purchasing-table td small{display:block;color:#8b9b8c;font-size:9px;margin-top:7px;overflow-wrap:anywhere}.purchasing-table tfoot th{background:none;text-align:right}.purchasing-table tfoot td{font-weight:650;color:#2d7051}.purchasing-table td:last-child{text-align:left}.purchasing-table td .download-link{font-size:10px;line-height:1.6}

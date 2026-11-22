@@ -12,6 +12,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
+from openpyxl import load_workbook
 
 from housesync import server
 from housesync.rates import BOQ_CODES, DEFAULT_LIBRARY_PATH
@@ -243,6 +244,84 @@ def test_http_rates_and_invalid_library_leave_issued_revision_available(http_app
     restarted = server.Application(application.output_root, rate_library_path=path)
     assert restarted.state()["revision"] == issued["revision"]
     assert len(restarted.revisions()) == 1
+
+
+def test_dated_pricing_http_keeps_saved_orders_and_exports_variations(http_application):
+    application, request, _ = http_application
+    _, body, _ = request("POST", "/api/build", {})
+    revision = json.loads(body)["revision"]
+    saved_file = application.output_root / revision / "result.json"
+    original = saved_file.read_bytes()
+    _, old_order, _ = request("GET", f"/purchase-orders/{revision}/FLOOR.pdf")
+    rule = {"name": "Fuel levy", "effective_from": "2026-12-01", "end_date": "2026-12-31",
+            "type": "fixed", "amount": 2, "component": "base", "scope": {"type": "rate_codes", "values": ["FLOOR"]}}
+    status, body, _ = request("POST", "/api/surcharges", rule)
+    assert status == 201 and json.loads(body)["surcharges"][0]["name"] == "Fuel levy"
+    status, _, _ = request("POST", "/api/surcharges", {**rule, "amount": -2})
+    assert status == 422
+    assert len(json.loads(request("GET", "/api/surcharges")[1])["surcharges"]) == 1
+
+    payload = {"revision": revision, "as_at": "2026-12-01", "before": "2026-11-30"}
+    status, body, _ = request("POST", "/api/reprice", payload)
+    assert status == 200
+    draft = json.loads(body)
+    assert draft["purchase_orders"]["updated_count"] == 1
+    assert draft["totals"]["delta"] == 160
+    assert draft["by_trade"][0]["delta"] == 160
+    assert draft["lines"][0]["applied_surcharges"][0]["name"] == "Fuel levy"
+    assert "Fuel levy" in draft["lines"][0]["causes"][0]
+
+    assert request("POST", "/api/purchase-order-statuses", {"revision": revision, "code": "FLOOR", "status": "issued"})[0] == 200
+    assert server.Application(application.output_root).order_statuses(revision)["statuses"] == {"FLOOR": "issued"}
+    status, body, _ = request("POST", "/api/reprice", payload)
+    assert status == 200
+    locked = json.loads(body)
+    assert locked["run_id"] != draft["run_id"]
+    assert locked["purchase_orders"]["updated_count"] == 0
+    assert locked["purchase_orders"]["variation_count"] == 1
+    assert locked["purchase_orders"]["variations"][0]["totals"]["total_incl_gst"]["difference"] == 176
+    assert json.loads(request("POST", "/api/reprice", payload)[1]) == locked
+    assert request("GET", f"/purchase-orders/{revision}/FLOOR.pdf")[1] == old_order
+    assert saved_file.read_bytes() == original
+
+    assert b"Fuel levy" in request("GET", locked["files"]["csv"])[1]
+    assert request("GET", locked["files"]["pdf"])[1].startswith(b"%PDF-")
+    assert request("GET", locked["files"]["client_quote_pdf"])[1].startswith(b"%PDF-")
+    workbook = load_workbook(BytesIO(request("GET", locked["files"]["xlsx"])[1]), read_only=True)
+    assert workbook.sheetnames == ["BOQ", "By trade", "By supplier"]
+    assert workbook["BOQ"]["K5"].value == 160
+    workbook.close()
+    with ZipFile(BytesIO(request("GET", locked["files"]["purchase_orders"])[1])) as archive:
+        assert f"PO-{revision}-FLOOR.pdf" not in archive.namelist()
+        assert any("FLOOR" in name and "VAR" in name for name in archive.namelist())
+    status, body, _ = request("POST", "/api/reprice", {**payload, "before": "2026-12-01", "as_at": "2027-01-01"})
+    assert status == 200
+    expired = json.loads(body)
+    assert expired["totals"]["delta"] == -160
+    assert "removed" in expired["lines"][0]["causes"][0]
+    assert expired["purchase_orders"]["variation_count"] == 0
+
+
+def test_repricing_cli_and_independent_export_are_deterministic(tmp_path, monkeypatch, capsys, fake_exports):
+    from shutil import copytree
+
+    first_app = server.Application(tmp_path / "first")
+    saved = first_app.build(HouseSettings())
+    revision = saved["revision"]
+    config = {"surcharges": [{"name": "Freight", "effective_from": "2026-12-01", "type": "fixed", "amount": 0.25,
+                             "component": "base", "scope": {"type": "rate_codes", "values": ["FLOOR"]}}]}
+    server.atomic_json(first_app.pricing_path, config)
+    second_app = server.Application(tmp_path / "second")
+    copytree(first_app.output_root / revision, second_app.output_root / revision)
+    server.atomic_json(second_app.pricing_path, config)
+    monkeypatch.setattr("sys.argv", ["house-sync", "reprice", revision, "--as-at", "2026-12-01", "--output", str(first_app.output_root)])
+    server.main()
+    cli = json.loads(capsys.readouterr().out)
+    independent = second_app.reprice(revision, "2026-12-01")
+    assert cli["totals"]["delta"] == 20
+    assert cli["run_id"] == independent["run_id"]
+    for key, path in cli["files"].items():
+        assert Path(path).read_bytes() == (second_app.output_root / independent["files"][key].lstrip("/")).read_bytes()
 
 
 def test_http_rejects_invalid_settings_without_creating_a_revision(http_application, fake_exports):

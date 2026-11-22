@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import socket
+import sys
 import threading
 import traceback
 import uuid
@@ -25,10 +26,11 @@ from .changes import compare_revisions, export_change_report
 from .documents import drawing_svg, export_documents
 from .engine import ROOF_OVERHANG_MM, ROOF_THICKNESS_MM, SLAB_THICKNESS_MM, build_house, revision_for
 from .layout import derive_layout
-from .purchasing import UnknownPurchaseOrder, purchase_order_pdf, purchase_orders_zip
+from .purchasing import UnknownPurchaseOrder, purchase_order_pdf, purchase_orders_zip, validate_purchase_order_statuses
 from .quote_documents import export_quote_documents
 from .quotes import build_variation_quote
 from .rates import RateLibrary, RateLibraryError, load_rate_library
+from .repricing import export_repricing, prepare_repricing
 from .schema import ExteriorFinish, HouseSettings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +38,7 @@ STATIC = Path(__file__).parent / "static"
 MAX_BODY = 4_194_304
 REVISION = re.compile(r"^[0-9a-f]{12}$")
 COMPARISON = re.compile(r"^[0-9a-f]{12}_[0-9a-f]{12}_[0-9a-f]{12}$")
+REPRICE_RUN = re.compile(r"^[0-9a-f]{24}$")
 COMPARISON_CONTRACT = "house-sync-client-quotes-1"
 COMPARISON_SOURCES = ("changes.py", "schema.py", "rates.py", "quotes.py", "quote_documents.py", "server.py")
 
@@ -98,13 +101,16 @@ def draft_drawing_svg(settings: HouseSettings) -> str:
 
 
 class Application:
-    def __init__(self, output_root: Path, rate_library_path: Path | None = None):
+    def __init__(self, output_root: Path, rate_library_path: Path | None = None, pricing_path: Path | None = None):
         self.output_root = output_root.resolve()
         self.rate_library_path = rate_library_path
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.latest: dict | None = None
         self.changes_root = self.output_root / "changes"
+        self.repricing_root = self.output_root / "repricing"
+        self.pricing_path = pricing_path or self.output_root / "pricing.json"
+        self.explicit_pricing_path = pricing_path is not None
 
     def read_revision(self, revision: str) -> dict:
         if not isinstance(revision, str) or not REVISION.fullmatch(revision):
@@ -124,6 +130,72 @@ class Application:
         if pointer.is_file():
             return self.read_revision(json.loads(pointer.read_text(encoding="utf-8"))["revision"])
         return None
+
+    def pricing_library(self) -> RateLibrary:
+        pricing = self.pricing_path if self.explicit_pricing_path or self.pricing_path.exists() else None
+        return load_rate_library(self.rate_library_path, pricing_path=pricing)
+
+    def surcharges(self) -> dict:
+        with self.lock:
+            return {"surcharges": (self.pricing_library().pricing or {}).get("surcharges", [])}
+
+    def add_surcharge(self, rule: dict) -> dict:
+        with self.lock:
+            pricing = self.pricing_library().pricing or {"rates": {}, "surcharges": []}
+            updated = {**pricing, "surcharges": [*pricing["surcharges"], rule]}
+            validated = load_rate_library(self.rate_library_path, pricing_data=updated).pricing
+            atomic_json(self.pricing_path, validated)
+            return {"surcharges": validated["surcharges"]}
+
+    def _order_statuses(self, saved: dict) -> dict:
+        path = self.output_root / "purchase-order-statuses" / (saved["revision"] + ".json")
+        statuses = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else saved.get("purchase_order_statuses", {})
+        return validate_purchase_order_statuses(saved, statuses)
+
+    def order_statuses(self, revision: str) -> dict:
+        with self.lock:
+            saved = self.read_revision(revision)
+            return {"statuses": self._order_statuses(saved),
+                    "orders": [{"code": row["code"], "description": row["description"]} for row in saved["boq"]]}
+
+    def set_order_status(self, revision: str, code: str, status: str) -> dict:
+        with self.lock:
+            saved = self.read_revision(revision)
+            if not isinstance(code, str):
+                raise ValueError("Choose a saved purchase order code.")
+            statuses = validate_purchase_order_statuses(saved, {**self._order_statuses(saved), code: status})
+            atomic_json(self.output_root / "purchase-order-statuses" / (revision + ".json"), statuses)
+            return self.order_statuses(revision)
+
+    def reprice(self, revision: str, as_at: str, before: str | None = None) -> dict:
+        """Publish an independent report and preserve the saved revision and orders."""
+        with self.lock:
+            saved = self.read_revision(revision)
+            statuses = self._order_statuses(saved)
+            report, baseline, target = prepare_repricing(saved, self.pricing_library(), as_at, before, statuses)
+            run_id = report["run_id"]
+            destination = self.repricing_root / run_id
+            record = destination / "report.json"
+            if record.is_file():
+                return json.loads(record.read_text(encoding="utf-8"))
+            self.repricing_root.mkdir(exist_ok=True)
+            temporary = self.repricing_root / ("building-" + uuid.uuid4().hex)
+            temporary.mkdir()
+            try:
+                files = export_repricing(report, baseline, target, saved, statuses, temporary)
+                report["files"] = {key: f"/repricing/{run_id}/{quote(name)}" for key, name in files.items()}
+                atomic_json(temporary / "report.json", report)
+                try:
+                    temporary.rename(destination)
+                except FileExistsError:
+                    # A second CLI/server process can publish the same report first.
+                    if record.is_file():
+                        return json.loads(record.read_text(encoding="utf-8"))
+                    raise
+                return report
+            finally:
+                if temporary.exists() and temporary.resolve().parent == self.repricing_root:
+                    shutil.rmtree(temporary)
 
     def compare(self, before_revision: str, after_revision: str) -> dict:
         """Compare immutable saved inputs; persist a source-versioned report."""
@@ -344,15 +416,30 @@ def handler_for(application: Application) -> type[BaseHTTPRequestHandler]:
             path = unquote(urlsplit(self.path).path)
             try:
                 if path == "/api/health":
-                    self._json({"status": "ok", "application": "House Sync", "features": ["revision_comparison", "client_variation_quotes"]})
+                    self._json({"status": "ok", "application": "House Sync", "features": ["revision_comparison", "client_variation_quotes", "dated_pricing"]})
                 elif path == "/api/state":
                     self._json(application.envelope(application.state()))
                 elif path == "/api/rates":
                     self._json(load_rate_library(application.rate_library_path).snapshot())
                 elif path == "/api/revisions":
                     self._json(application.revisions())
+                elif path == "/api/surcharges":
+                    self._json(application.surcharges())
+                elif path == "/api/purchase-order-statuses":
+                    query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                    revisions = query.get("revision", [])
+                    if len(revisions) != 1:
+                        raise ValueError("Choose one saved revision.")
+                    self._json(application.order_statuses(revisions[0]))
                 elif path.startswith("/purchase-orders/"):
                     self._purchase_order(path)
+                elif path.startswith("/repricing/"):
+                    parts = path.split("/", 3)
+                    if len(parts) != 4 or not REPRICE_RUN.fullmatch(parts[2]):
+                        self._json({"error": "Repricing report not found"}, 404)
+                        return
+                    directory = application.repricing_root / parts[2]
+                    self._file(directory / parts[3], directory, attachment=True)
                 elif path == "/api/compare":
                     query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
                     if len(query.get("before", [])) != 1 or len(query.get("after", [])) != 1:
@@ -421,7 +508,8 @@ def handler_for(application: Application) -> type[BaseHTTPRequestHandler]:
                 self._reject_post("Origin is not allowed", 403)
                 return
             route = urlsplit(self.path).path
-            if route not in {"/api/build", "/api/layout", "/api/drawings-preview", "/api/shutdown"}:
+            if route not in {"/api/build", "/api/layout", "/api/drawings-preview", "/api/shutdown",
+                             "/api/reprice", "/api/surcharges", "/api/purchase-order-statuses"}:
                 self._json({"error": "Route not found"}, 404)
                 return
             if self.headers.get_content_type() != "application/json":
@@ -433,6 +521,17 @@ def handler_for(application: Application) -> type[BaseHTTPRequestHandler]:
                     self._json({"error": "Invalid request size"}, 413)
                     return
                 body = self.rfile.read(length)
+                if route in {"/api/reprice", "/api/surcharges", "/api/purchase-order-statuses"}:
+                    payload = json.loads(body)
+                    if not isinstance(payload, dict):
+                        raise ValueError("Send a JSON object.")
+                    if route == "/api/reprice":
+                        self._json(application.reprice(payload.get("revision"), payload.get("as_at"), payload.get("before")))
+                    elif route == "/api/surcharges":
+                        self._json(application.add_surcharge(payload), 201)
+                    else:
+                        self._json(application.set_order_status(payload.get("revision"), payload.get("code"), payload.get("status")))
+                    return
                 if route == "/api/layout":
                     draft = json.loads(body)
                     if not isinstance(draft, dict):
@@ -459,6 +558,8 @@ def handler_for(application: Application) -> type[BaseHTTPRequestHandler]:
                 self._json({"error": "; ".join(messages)}, 422)
             except RateLibraryError as exc:
                 self._json({"error": str(exc)}, 422)
+            except FileNotFoundError as exc:
+                self._json({"error": str(exc)}, 404)
             except (ValueError, json.JSONDecodeError) as exc:
                 self._json({"error": str(exc)}, 400)
             except Exception as exc:
@@ -469,15 +570,37 @@ def handler_for(application: Application) -> type[BaseHTTPRequestHandler]:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["reprice"]:
+        parser = argparse.ArgumentParser(prog="house-sync reprice", description="Reprice an existing saved BOQ without rebuilding the design.")
+        parser.add_argument("revision")
+        parser.add_argument("--as-at", required=True, help="Target pricing date (YYYY-MM-DD)")
+        parser.add_argument("--before", help="Compare BOQ against this date instead of the saved rates (YYYY-MM-DD)")
+        parser.add_argument("--output", type=Path, default=ROOT / "out" / "house-sync", help="Existing House Sync revision folder")
+        parser.add_argument("--rates", type=Path, help="Path to the project unit-rate CSV")
+        parser.add_argument("--pricing", type=Path, help="Path to the dated pricing JSON")
+        args = parser.parse_args(sys.argv[2:])
+        application = Application(args.output, args.rates, args.pricing)
+        try:
+            report = application.reprice(args.revision, args.as_at, args.before)
+        except (FileNotFoundError, RateLibraryError, ValueError) as exc:
+            parser.error(str(exc))
+        print(json.dumps({key: report[key] for key in ("revision", "as_at", "before", "totals", "run_id")}
+                         | {"draft_count": len(report["purchase_orders"]["orders"]),
+                            "updated_count": report["purchase_orders"]["updated_count"],
+                            "variation_count": report["purchase_orders"]["variation_count"],
+                            "files": {key: str(application.output_root / value.lstrip("/"))
+                                      for key, value in report["files"].items()}}, indent=2))
+        return
     parser = argparse.ArgumentParser(description="Run the House Sync editor on this PC.")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--open", action="store_true", help="Open the editor in the default browser")
     parser.add_argument("--output", type=Path, default=ROOT / "out" / "house-sync")
     parser.add_argument("--rates", type=Path, help="Path to the project unit-rate CSV (default: rates/rates_aud.csv)")
+    parser.add_argument("--pricing", type=Path, help="Path to the dated pricing JSON (default: pricing.json in the output folder)")
     args = parser.parse_args()
     if not (ROOT / "node_modules" / "three" / "build" / "three.module.js").exists():
         parser.error("Browser dependencies are missing. Run npm ci in the project folder first.")
-    application = Application(args.output, rate_library_path=args.rates)
+    application = Application(args.output, rate_library_path=args.rates, pricing_path=args.pricing)
     server = LocalHTTPServer(("127.0.0.1", args.port), handler_for(application))
     url = f"http://127.0.0.1:{args.port}"
     print(f"House Sync is running at {url}\nRevision files: {args.output}\nPress Ctrl+C to stop.", flush=True)

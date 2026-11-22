@@ -12,7 +12,7 @@ The project starts from [homespec](https://github.com/maccman/homespec), an MIT-
 
 The delivered local workflow includes AUD trade pricing, the CSV rate library and overrides, constrained plan editing, orthogonal partitions, named rooms, room finish schedules, grouped BOQs, draft purchasing and client variation quotes with separate internal detail. The default is one room in a rectangular shell. Adding partitions creates rooms measured from the same model.
 
-The drafter, estimator, scheduler and purchasing team work from saved revision IDs. The proposed BOQ is calculated with the model update. Client acceptance, BOQ release and supplier issue remain manual builder decisions. Approval and issue registers are planned.
+The drafter, estimator, scheduler and purchasing team work from saved revision IDs. The proposed BOQ is calculated with the model update. Client acceptance, BOQ release and supplier issue remain manual builder decisions. Purchasing can record PO status for dated repricing. Formal approval and delivery registers are planned.
 
 ## Delivered scope
 
@@ -28,11 +28,11 @@ The demonstration starts with a single room in a rectangular shell, as a concept
 | Editable settings | House dimensions, external facebrick or rendered paint, inner brick bare or plastered and painted, paint coats, per-item wastage, currency, rate overrides and source/date; stable-ID doors/windows with host, start, width, height and sill |
 | Plan and browser model | Direct constrained plan edits, snapping, undo/redo and draft review; compiled 3D view |
 | BOQ | Shell and room lines using eleven trade codes, exported to Excel and CSV, with net quantities, wastage, gross priced quantities and row-level rate provenance |
-| Rate library | Editable `rates/rates_aud.csv`, one source/date per BOQ code, library snapshot SHA-256, optional project overrides |
+| Rate library | Baseline `rates/rates_aud.csv`, optional JSON component history and scoped surcharges, library snapshot SHA-256, optional project overrides |
 | Technical specification | Draft schedule of dimensions, materials, finishes, and measurement scope, exported to Word and PDF |
 | Drawings | Live draft floor plan, four exterior elevations and opening schedule, with SVG and PDF exports for each saved revision |
 | Client variation quote | Proposed revision's markup, fee, credit policy, PC/PS movements, signed GST and validity; separate client/internal PDFs |
-| Purchasing | Fillable draft PDF per saved BOQ row or complete ZIP, without repricing a historical revision |
+| Purchasing | Fillable draft PDF per saved BOQ row, dated draft regeneration, and separate draft variations for issued or accepted orders |
 | Model data | IFC, compiled intermediate representation, source settings, and upstream schedules/drawings |
 
 All exported documents are snapshots of the selected design revision. Editing an exported spreadsheet or Word document does not change the model. Saved settings provide the application's editable inputs.
@@ -74,9 +74,17 @@ A new 10 × 8 m design uses exposed facebrick outside and plaster and paint insi
 
 For the rendered reference design, check quantities are 80.000 m2 clear floor/finish/ceiling area, 20.940 m3 net wall volume, 35.000 m skirting, 102.300 m2 internal plaster/render, 107.100 m2 external render, 209.400 m2 measured paint area (418.800 m2 at two coats), 99.000 m2 roof area, one door and two windows. At default wastage and rates, the subtotal is **AUD 53,330.22**. Increasing the length to 12 m gives **AUD 61,640.22**, a difference of **AUD 8,310.00**; the README contains the itemised worked example.
 
-Older designs retain explicitly saved rates as overrides and retain their currency. Pre-finishes designs may lack new item prices: when the current library has another currency, supply all missing rates or select a matching-currency library before building. Saved revision BOQs are never repriced or rewritten; comparisons still use their recorded amounts and reject different currencies. Coat or wastage edits affect the quantity component. With a known library basis in both revisions, rate effects are attributed first to library changes holding old overrides, then to override changes at the new library and quantity. Historical missing basis remains unknown.
+Older designs retain explicitly saved rates as overrides and retain their currency. Pre-finishes designs may lack new item prices: when the current library has another currency, supply all missing rates or select a matching-currency library before building. Published BOQs retain their recorded amounts. Dated pricing produces a separate report against the same revision and quantities. Coat or wastage edits affect the quantity component. With a known library basis in both revisions, design comparisons attribute rate effects first to library changes holding old overrides, then to override changes at the new library and quantity. Historical missing basis remains unknown.
 
 Edit the CSV, use **Refresh rate library** on the **Rates** tab, review values and per-row sources/dates, then explicitly update the house and documents. Optional per-item overrides and **Use library** controls manage project exceptions. A custom file can be selected with `--rates`. Generated revisions preserve the full SHA-256 of the raw library bytes and a detached copy of its rows, plus effective rate provenance for the coordinated exports; merely changing the CSV does not rewrite saved revisions.
+
+### Date-based repricing and purchasing
+
+The optional JSON pricing file extends CSV rates with material, labour, plant and freight amounts, labels for trade, supplier and material category, and append-only dated versions. A rate with no breakdown keeps its original value as one component. Repricing takes the latest applicable component values, then applies active rules in file order. Each surcharge specifies its date range, fixed AUD or percentage amount, target component and scope. A percentage uses the target component's value at that step. The resolved pricing library and effective date accompany the report.
+
+The estimator uses **Changes & cost**, the local API or the CLI to reprice a saved AUD BOQ. The Excel, CSV and PDF compare the old and new unit rates and amounts, list causes, and reconcile totals by trade and supplier. The purchasing export retains the saved BOQ row codes and order grouping. It regenerates draft PDFs with old and new amounts, differences and GST, and writes a separate draft variation for each issued or accepted order whose amount changes. The recorded PO status and saved contract amount apply even when the estimator chooses an alternate comparison date for the BOQ.
+
+The [worked pricing file](../examples/dated-pricing.json) applies a **5% levy to freight** in December 2026 and a **3% surcharge to steel material** from 1 December 2026. Generated from the rendered 10 × 8 m one-room design, the 1 December BOQ increased from **AUD 53,330.22 to AUD 53,662.64 excluding GST**. The three changes were floor **AUD 20.00**, wall **AUD 10.47** and roof **AUD 301.95**. With all orders in draft, **11 POs regenerate and 3 change in value**. With the roof already issued, **2 draft POs change** and the roof gets **1 draft variation** for **AUD 301.95 excluding GST** or **AUD 332.15 including GST**. The README includes the command to reproduce these figures.
 
 ### Client quote pricing
 
@@ -109,7 +117,7 @@ The DOCX package and contents passed structural tests. Visual DOCX rendering was
 | 1. Drafter | Constrained shell editing, orthogonal partitions, stable named rooms, room finish schedules, dimensioned plans, IFC and 3D views | Extend beyond orthogonal partitions and rectangular shells. Add per-face finishes and a product palette with physical colour references, substrate, preparation and coating systems. |
 | 2. Estimator | Illustrative AUD trade rates, dated CSV library, project overrides, A-to-B quantity/rate effects, client quotes, fixed fee, credit policy and separate PC/PS movements | Add verified supplier quotations, location context and project-specific tax treatment beyond the fixed quote GST rule. Record the client's decision against the specific priced revision. |
 | 3. Scheduler | Compiled shell and room BOQ groups, finish trades, paint coats, wastage and immutable revision exports | Record which BOQ is released for an accepted variation, with an issue register and controlled approval state. |
-| 4. Purchasing | One fillable draft purchase order per saved BOQ row and a ZIP of the complete set | Link supplier/product selections, material coverage and pack sizes to order lines; record issued orders and delivery status. |
+| 4. Purchasing | Fillable PDFs, recorded order status, dated draft regeneration and variations for issued or accepted orders | Link supplier/product selections, material coverage and pack sizes to order lines; record deliveries. |
 
 Configurable document templates and an authenticated hosted service remain longer-term options after the local workflow is established. Client sign-off and supplier ordering are manual builder decisions; the current exporters do not send orders or update approval state.
 
