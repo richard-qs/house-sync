@@ -69,10 +69,12 @@ jobs:
           retention-days: 7
 
   blender:
-    name: Blender 5.2.1 / CPU
+    name: Blender / CPU
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
+      BLENDER_VERSION: '5.2.1'
+      BLENDER_SHA256: a31f524fa99a527d3d52b7f5aaa68c34e1a19d5a1c9473f79c5cc610fd5b10e9
       HOMESPEC_REQUIRE_BLENDER: '1'
       HOMESPEC_DEVICE: cpu
       LIBGL_ALWAYS_SOFTWARE: '1'
@@ -87,19 +89,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb xauth libgl1 libegl1 libxi6 libxrender1 libxkbcommon0 libxfixes3 libsm6 libxxf86vm1 librsvg2-bin
+      - name: Cache Blender release archive
+        id: blender-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/blender.tar.xz
+          key: blender-${{ runner.os }}-${{ runner.arch }}-${{ env.BLENDER_VERSION }}-${{ env.BLENDER_SHA256 }}
+      - name: Download Blender release
+        if: steps.blender-cache.outputs.cache-hit != 'true'
+        working-directory: ${{ runner.temp }}
+        run: |
+          release="release/Blender${BLENDER_VERSION%.*}/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          download() {
+            curl --fail --location --retry 5 --retry-delay 10 --retry-all-errors \
+              --connect-timeout 15 --max-time 120 --retry-max-time 180 \
+              --output blender.tar.xz "$1/$release"
+          }
+          download https://download.blender.org || download https://mirror.blender.org
       - name: Install verified Blender release
         working-directory: ${{ runner.temp }}
         run: |
-          curl --fail --location --retry 3 --output blender.tar.xz https://download.blender.org/release/Blender5.2/blender-5.2.1-linux-x64.tar.xz
-          echo 'a31f524fa99a527d3d52b7f5aaa68c34e1a19d5a1c9473f79c5cc610fd5b10e9  blender.tar.xz' | sha256sum --check
+          echo "$BLENDER_SHA256  blender.tar.xz" | sha256sum --check
           tar -xf blender.tar.xz
-          echo "$RUNNER_TEMP/blender-5.2.1-linux-x64" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/blender-${BLENDER_VERSION}-linux-x64" >> "$GITHUB_PATH"
       - name: Install locked dependencies
         run: uv sync --locked --extra dev
       - name: Verify Blender version
         run: |
           command -v blender
-          blender --background --factory-startup --python-exit-code 1 --python-expr 'import bpy; assert bpy.app.version == (5, 2, 1), bpy.app.version_string'
+          blender --background --factory-startup --python-exit-code 1 --python-expr 'import bpy, os; assert bpy.app.version == tuple(map(int, os.environ["BLENDER_VERSION"].split("."))), bpy.app.version_string'
       - name: Run required Blender integrations
         run: xvfb-run -a uv run --frozen pytest -m blender --junitxml=blender-results.xml
       - name: Preserve failure reports
