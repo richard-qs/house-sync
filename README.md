@@ -48,13 +48,13 @@ Built on [homespec](https://github.com/maccman/homespec) by Alex MacCaw. The ori
 ## Available capabilities
 
 - A single-storey rectangular shell with a flat roof. The default design opens as one room with one door and two windows. Orthogonal partitions divide the shell into named rooms.
-- Editable clear internal length/width, wall height/thickness, independent external and internal brick finishes, paint coat count, currency, per-item wastage and optional rate overrides. A versioned CSV library supplies one rate and source/date for each of the eleven BOQ items.
+- Editable clear internal length/width, wall height/thickness, independent external and internal brick finishes, paint coat count, currency, per-item wastage and optional rate overrides. The CSV library supplies the baseline rates and an optional JSON file adds components, rate history and surcharges.
 - A primary **Plan editor** for selecting walls, dragging north/east resize grips, editing dimensions, and adding, moving, resizing or deleting doors/windows. Grid snapping, pan/zoom, measurement, undo/redo, geometry checks and a draft change review support direct editing.
 - An interactive 3D model: orbit, zoom, select elements, and show/hide the roof.
 - Eleven BOQ rate codes in Excel/CSV cover shell and room takeoffs, including floor finish, ceiling, skirting, internal plaster/render and external render. Each line shows net quantity, wastage, gross priced quantity and its rate basis. Exports include the technical specification in Word/PDF, the dimensioned floor plan and all four elevations in SVG/PDF, and the model in IFC.
 - Save/reopen a design as JSON. Previous generated revisions remain available locally.
 - Every output identifies the same content-based revision. Pending edits disable downloads until regeneration.
-- A **Changes & cost** tab compares saved revision A with revision B, records descriptions of the changes, and shows before/after BOQ quantities, rates, amounts, additions, omissions and the net estimate difference. Reports are available in Excel, CSV, PDF and JSON.
+- A **Changes & cost** tab compares saved designs or prices a saved BOQ as at a date. Dated pricing reports show the old and new prices, causes, and totals by trade and supplier.
 - A **Purchasing** tab downloads one fillable draft purchase-order PDF per saved BOQ item, or all item PDFs in a ZIP. It uses the saved revision's quantities and prices.
 - Saved builder pricing settings for one combined overhead and margin markup, a fixed administration fee, credit treatment and quote validity; separately identified prime cost (PC) and provisional sum (PS) allowances.
 - A client variation quote PDF with acceptance fields, plus a separate internal itemised breakdown. The saved comparison retains the issue date and both source revisions.
@@ -213,9 +213,50 @@ The loader rejects invalid rows with a CSV line reference. A build needs either 
 
 For example, the default 80 m2 floor finish has 10% wastage, giving **88 m2** gross. At AUD 65/m2 its amount is **AUD 5,720.00**. Changing the library rate to 70 with no override gives **AUD 6,160.00**, a **AUD 440.00 library rate effect**. Keeping the library at 65 and entering a 70 override gives the same amount, attributed to the override. If an override already pins the item at 70, changing the underlying library row does not change that item's effective rate.
 
-Each generated revision saves the library's full SHA-256 over its raw CSV bytes and its row data, plus the effective rates and their provenance. BOQ and specification exports identify whether each effective rate came from the library or an override, with the source/date. A source/date-only CSV edit changes the library fingerprint and may produce a new revision while leaving costs unchanged. Quantity, library and override effects are calculated in that order, with rounding reconciled to the saved item amounts.
+Each generated revision saves the library's full SHA-256 over its raw CSV bytes, along with the row data, effective rates and provenance. A dated report records its own pricing basis and fingerprint, which also includes the validated JSON configuration. BOQ and specification exports identify whether each effective rate came from the library or an override, with the source/date. A source/date-only CSV edit changes the library fingerprint and may produce a new revision while leaving costs unchanged. Quantity, library and override effects are calculated in that order, with rounding reconciled to the saved item amounts.
 
 Existing designs with explicit stored rates retain those values as overrides rather than silently adopting the current library. Older pre-finishes designs in another currency may not contain prices for every new trade: they can be opened, but missing values or a matching-currency library must be supplied before building. Saved BOQs remain authoritative for historical comparisons, and different currencies still cannot be compared.
+
+## Price a saved BOQ as at a date
+
+In **Changes & cost**, select a saved AUD revision, enter **Price as at**, and choose **Re-price and prepare POs**. The report compares against the saved prices by default. Choose a comparison date to compare two dates on the same BOQ quantities. Download the re-pricing report in Excel, CSV or PDF and the draft order and variation PDFs in one ZIP. The historical design and its original downloads stay available.
+
+Use **Surcharge history and new surcharges** to add a rule in the viewer. Use **Record purchase order status** to mark saved items the builder has already issued or that the supplier has accepted. Repricing compares POs with the saved order amounts, including when the BOQ report uses a different comparison date. It regenerates a PDF for each draft and creates a separate draft variation when an issued or accepted order's amount changes. BOQ amounts exclude GST. Dated PO PDFs show 10% GST and the inclusive totals. Review every document before issue through your usual purchasing process.
+
+### Dated pricing file
+
+For a project rate history, use a UTF-8 JSON file alongside the CSV. The default is `pricing.json` in the server output folder. Select another file with `--pricing`. The viewer appends new surcharge rules to the active file. See the complete [dated pricing example](examples/dated-pricing.json).
+
+| JSON field | Meaning |
+|---|---|
+| `rates` | Object keyed by CSV rate code. Supply optional `trade`, `supplier` and `material_category` labels to group and scope prices. |
+| `components` | Baseline AUD per unit amounts keyed by `material`, `labour`, `plant` or `freight`. The sum must equal the CSV rate. A code without a breakdown retains the single `base` component. |
+| `versions` | Append one entry per `effective_from` date to keep the complete history. A `components` entry updates only the named components. Use `replace: true` to provide a complete breakdown, including when splitting an unsplit rate. A `rate` entry provides a new whole rate. |
+| `surcharges` | Ordered array. Each entry has `name`, `effective_from`, optional inclusive `end_date`, `type` (`percentage` or `fixed`), `amount`, `component` and `scope`. Dates use `YYYY-MM-DD`. A percentage of 5 means 5%; a fixed amount of 5 means AUD 5 per BOQ unit. |
+| `scope` | Object with `type` (`library`, `trade`, `supplier`, `material_category` or `rate_codes`). Supply a `values` array for scoped matches. Matching ignores case. |
+
+Pricing takes the latest applicable version of each component, starting with the CSV baseline. Active surcharge rules run in the array's order. A percentage applies to the component's running value after earlier rules, and a fixed charge adds to it. A rule applies only when its target component exists and its scope matches. Project overrides keep their saved rate. Each report identifies the active surcharges and any rate changes, and line amounts round to cents before being totalled.
+
+### Worked example · fuel and steel from 1 December 2026
+
+The example uses the rendered 10 × 8 m one-room design. Add a **5% fuel levy on freight** for December and a **3% steel surcharge on material** from 1 December. The 30 November subtotal is **AUD 53,330.22**. On 1 December the same quantities cost **AUD 53,662.64**, an increase of **AUD 332.42 excluding GST**.
+
+| BOQ line | Gross quantity | Old rate | New rate | Difference ex GST | Cause |
+|---|---:|---:|---:|---:|---|
+| Floor | 80.000 m² | 95.00 | 95.25 | 20.00 | 5% on AUD 5.00 freight |
+| Wall | 20.940 m³ | 380.00 | 380.50 | 10.47 | 5% on AUD 10.00 freight |
+| Roof | 99.000 m² | 145.00 | 148.05 | 301.95 | 5% on AUD 10.00 freight and 3% on AUD 85.00 steel material |
+
+House Sync regenerates **11 draft POs** from this saved BOQ, with **3 changing in value**. Mark the roof PO as issued and re-run to get **2 changed drafts** and **1 draft variation** for the roof increase of **AUD 301.95 excluding GST** (**AUD 332.15 including GST**).
+
+Generate the example from the repository root in PowerShell. The first command saves the rendered reference design and captures its revision ID.
+
+~~~powershell
+$revision = .venv\Scripts\python.exe -c "from pathlib import Path; from housesync.schema import HouseSettings; from housesync.server import Application; print(Application(Path('out/dated-pricing-example')).build(HouseSettings())['revision'])"
+.venv\Scripts\python.exe -m housesync.server reprice $revision --as-at 2026-12-01 --before 2026-11-30 --output out/dated-pricing-example --pricing examples/dated-pricing.json
+~~~
+
+The CLI prints the report paths and counts of 11 drafts, 3 updated drafts and 0 variations for the unissued set.
 
 ## Generated example guide
 

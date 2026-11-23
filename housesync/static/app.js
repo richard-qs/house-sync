@@ -30,6 +30,7 @@ let draftInterior = interiorSettings({});
 const stableSettings = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 const comparableSettings = settings => normalizeBoqSettings({ ...settings, ...interiorSettings(settings), openings: settings.openings ?? legacyOpenings() });
 const comparison = { revisions: [], result: null, busy: false, request: 0, refresh: 0, selection: 0 };
+const repricing = { request: 0, busy: false, surchargeRequest: 0, savingSurcharge: false, orderRequest: 0, savingOrder: false, orderStatuses: {} };
 const rateLibraryState = { current: null, error: '', request: 0, busy: false };
 const overrideFields = Object.fromEntries(RATE_ITEMS.map(([code]) => [code, '#override-' + code.toLowerCase().replaceAll('_', '-')]));
 const wastageFields = Object.fromEntries(Object.keys(WASTAGE_DEFAULTS).map(key => [key, '#wastage-' + key.replaceAll('_', '-')]));
@@ -675,6 +676,7 @@ async function refreshComparisons(result, previousRevision, fromBuild = false) {
     const revisions = await fetchJSON('/api/revisions');
     if (refresh !== comparison.refresh || state.result?.revision !== result.revision) return;
     comparison.revisions = Array.isArray(revisions) ? revisions : revisions.revisions || [];
+    setRepriceRevisions(comparison.revisions, result.revision);
     const valid = new Set(comparison.revisions.map(record => record.revision));
     const preferredPair = selection === comparison.selection ? previousPair : comparisonPair();
     for (const id of ['#compare-before', '#compare-after']) {
@@ -706,6 +708,7 @@ async function refreshComparisons(result, previousRevision, fromBuild = false) {
     else $('#comparison-status').textContent = 'Update the house to save a revision, then compare its changes here.';
   } catch (error) {
     if (refresh !== comparison.refresh) return;
+    if (!$('#repricing-revision').value) setRepriceRevisions([{ revision: result.revision, settings: result.settings }], result.revision);
     comparisonError(`Saved revisions could not be loaded: ${error.message}`);
     setComparisonDownloads();
   }
@@ -817,6 +820,277 @@ async function fetchJSON(url, options = {}) {
     throw new Error(message);
   }
   return data;
+}
+
+const postJSON = (url, data) => fetchJSON(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+
+function repriceError(selector, message = '') {
+  const element = $(selector);
+  element.textContent = message;
+  element.hidden = !message;
+}
+
+function setRepriceButton() {
+  $('#repricing-submit').disabled = repricing.busy || repricing.savingSurcharge || repricing.savingOrder || !$('#repricing-revision').value || !$('#repricing-date').value;
+}
+
+function clearRepriceResult(message = 'Choose a date to check current costs against the saved BOQ. Values exclude GST.') {
+  repricing.request += 1;
+  repricing.busy = false;
+  $('#repricing-result').hidden = true;
+  $('#repricing-status').textContent = message;
+  repriceError('#repricing-error');
+  setRepriceButton();
+}
+
+function setRepriceRevisions(revisions, latest) {
+  const select = $('#repricing-revision');
+  const previous = select.value;
+  const records = revisions.filter(record => (record.currency || record.settings?.currency) === 'AUD');
+  select.replaceChildren();
+  for (const record of records) {
+    const option = document.createElement('option');
+    option.value = record.revision;
+    option.textContent = revisionLabel(record);
+    select.append(option);
+  }
+  if (!records.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No saved AUD revision';
+    select.append(option);
+  }
+  const revisionsById = new Set(records.map(record => record.revision));
+  select.value = revisionsById.has(previous) ? previous : revisionsById.has(latest) ? latest : records[0]?.revision || '';
+  if (select.value !== previous) repriceRevisionChanged();
+  else setRepriceButton();
+}
+
+function repriceRevisionChanged() {
+  clearRepriceResult();
+  repricing.orderRequest += 1;
+  if ($('#repricing-order-settings').open) void loadOrderStatuses();
+}
+
+function appendRepriceRow(body, values, deltaIndex, delta) {
+  const row = document.createElement('tr');
+  for (const [index, value] of values.entries()) {
+    const cell = document.createElement('td');
+    cell.textContent = value;
+    if (index === deltaIndex) cell.className = deltaClass(delta);
+    row.append(cell);
+  }
+  body.append(row);
+}
+
+function renderRepriceResult(result) {
+  const { currency, totals } = result;
+  $('#repricing-old').textContent = money(totals.old_amount, currency);
+  $('#repricing-new').textContent = money(totals.new_amount, currency);
+  $('#repricing-delta').textContent = signedMoney(totals.delta, currency);
+  $('#repricing-delta').className = deltaClass(totals.delta);
+  const body = $('#repricing-lines');
+  body.replaceChildren();
+  const rate = value => `${currency} ${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })}`;
+  for (const line of result.lines) {
+    const surcharges = (line.applied_surcharges || []).map(rule => `${rule.name} (${rule.component}, ${rate(rule.unit_rate_change)}/${line.unit})`);
+    const audit = [(line.causes || []).join(' · '), surcharges.length ? `Applied ${surcharges.join(' · ')}` : ''].filter(Boolean).join('\n');
+    appendRepriceRow(body, [[line.code, line.description].filter(Boolean).join(' · '), `${Number(line.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })} ${line.unit}`, rate(line.old_rate), rate(line.new_rate), signedMoney(line.delta, currency), audit || '—'], 4, line.delta);
+  }
+  for (const [selector, groups] of [['#repricing-by-trade', result.by_trade], ['#repricing-by-supplier', result.by_supplier]]) {
+    const groupBody = $(selector);
+    groupBody.replaceChildren();
+    for (const group of groups || []) appendRepriceRow(groupBody, [group.name, money(group.old_amount, currency), money(group.new_amount, currency), signedMoney(group.delta, currency)], 3, group.delta);
+  }
+  for (const link of document.querySelectorAll('[data-reprice-file]')) {
+    const url = downloadURL(result.files?.[link.dataset.repriceFile]);
+    link.hidden = !url;
+    if (url) link.href = url;
+    else link.removeAttribute('href');
+  }
+  const orders = result.purchase_orders;
+  $('#repricing-order-counts').textContent = orders ? `${orders.updated_count} draft ${orders.updated_count === 1 ? 'PO' : 'POs'} updated · ${orders.variation_count} draft PO ${orders.variation_count === 1 ? 'variation' : 'variations'}` : '';
+  $('#repricing-order-basis').hidden = !result.before;
+  $('#repricing-status').textContent = `Revision ${result.revision} as at ${result.as_at}, compared with ${result.before || 'the saved BOQ'}. AUD excluding GST.`;
+  $('#repricing-result').hidden = false;
+}
+
+async function repriceSavedRevision(event) {
+  event.preventDefault();
+  const revision = $('#repricing-revision').value;
+  const asAt = $('#repricing-date').value;
+  const before = $('#repricing-before').value;
+  if (!revision || !asAt || repricing.busy || repricing.savingOrder || repricing.savingSurcharge) return;
+  clearRepriceResult('Applying dated rates and preparing draft purchase orders…');
+  const request = repricing.request;
+  repricing.busy = true;
+  setRepriceButton();
+  try {
+    const result = await postJSON('/api/reprice', { revision, as_at: asAt, ...(before ? { before } : {}) });
+    if (request !== repricing.request) return;
+    if (result.revision !== revision || result.as_at !== asAt || (result.before || '') !== before || result.currency !== 'AUD' || !result.totals || !Array.isArray(result.lines)) {
+      throw new Error('The report returned different pricing inputs. Re-price this revision again.');
+    }
+    renderRepriceResult(result);
+  } catch (error) {
+    if (request !== repricing.request) return;
+    $('#repricing-status').textContent = '';
+    repriceError('#repricing-error', error.message);
+  } finally {
+    if (request === repricing.request) {
+      repricing.busy = false;
+      setRepriceButton();
+    }
+  }
+}
+
+function syncSurchargeForm() {
+  const allRates = $('#surcharge-scope').value === 'library';
+  $('#surcharge-values-field').hidden = allRates;
+  $('#surcharge-values').disabled = allRates;
+  $('#surcharge-values').required = !allRates;
+  $('#surcharge-amount-label').textContent = $('#surcharge-type').value === 'percentage' ? 'Percentage (%)' : 'AUD per unit';
+  $('#surcharge-end').min = $('#surcharge-from').value;
+}
+
+function renderSurchargeHistory({ surcharges }) {
+  const list = $('#surcharge-list');
+  list.replaceChildren();
+  $('#surcharge-list-status').textContent = surcharges.length ? '' : 'No surcharges have been added.';
+  const labels = { library: 'Whole library', trade: 'Trade', supplier: 'Supplier', material_category: 'Material category', rate_codes: 'Rate codes' };
+  for (const record of surcharges) {
+    const item = document.createElement('li');
+    const amount = record.type === 'percentage' ? `${record.amount}%` : `AUD ${record.amount} per unit`;
+    const when = record.end_date ? `${record.effective_from} through ${record.end_date}` : `from ${record.effective_from}`;
+    const scope = [labels[record.scope.type], ...(record.scope.values || [])].filter(Boolean).join(' / ');
+    item.textContent = `${record.name} · ${amount} on ${record.component === 'base' ? 'unsplit rate' : record.component} · ${scope} · ${when}`;
+    list.append(item);
+  }
+}
+
+async function loadSurcharges() {
+  const request = ++repricing.surchargeRequest;
+  $('#surcharge-list-status').textContent = 'Loading surcharge history…';
+  try {
+    const data = await fetchJSON('/api/surcharges');
+    if (request === repricing.surchargeRequest) renderSurchargeHistory(data);
+  } catch (error) {
+    if (request === repricing.surchargeRequest) $('#surcharge-list-status').textContent = error.message;
+  }
+}
+
+async function saveSurcharge(event) {
+  event.preventDefault();
+  if (repricing.savingSurcharge) return;
+  $('#surcharge-save-status').textContent = '';
+  repriceError('#surcharge-error');
+  const scopeType = $('#surcharge-scope').value;
+  const values = $('#surcharge-values').value.split(',').map(value => value.trim()).filter(Boolean);
+  const name = $('#surcharge-name').value.trim();
+  if (!name || (scopeType !== 'library' && !values.length)) {
+    repriceError('#surcharge-error', !name ? 'Enter a surcharge name.' : 'Enter at least one scope value.');
+    return;
+  }
+  const endDate = $('#surcharge-end').value;
+  const record = {
+    name, effective_from: $('#surcharge-from').value, ...(endDate ? { end_date: endDate } : {}),
+    type: $('#surcharge-type').value, amount: Number($('#surcharge-amount').value), component: $('#surcharge-component').value,
+    scope: { type: scopeType, ...(scopeType === 'library' ? {} : { values }) },
+  };
+  repricing.savingSurcharge = true;
+  $('#surcharge-submit').disabled = true;
+  setRepriceButton();
+  try {
+    const data = await postJSON('/api/surcharges', record);
+    repricing.surchargeRequest += 1;
+    renderSurchargeHistory(data);
+    $('#surcharge-form').reset();
+    syncSurchargeForm();
+    $('#surcharge-save-status').textContent = `Added ${record.name}.`;
+    clearRepriceResult('Surcharge added. Re-price the revision to apply the current library.');
+  } catch (error) {
+    repriceError('#surcharge-error', error.message);
+  } finally {
+    repricing.savingSurcharge = false;
+    $('#surcharge-submit').disabled = false;
+    setRepriceButton();
+  }
+}
+
+function syncOrderStatus(showSavedValue = true) {
+  const code = $('#repricing-order-code').value;
+  const status = $('#repricing-order-status');
+  const storedStatus = repricing.orderStatuses[code] || 'draft';
+  if (showSavedValue) status.value = storedStatus;
+  status.disabled = !code || repricing.savingOrder;
+  $('#repricing-order-submit').disabled = status.disabled || status.value === storedStatus;
+}
+
+function renderOrderStatuses(data, selected = '') {
+  const select = $('#repricing-order-code');
+  repricing.orderStatuses = data.statuses;
+  select.replaceChildren();
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = data.orders.length ? 'Choose a BOQ item' : 'No saved BOQ items';
+  select.append(placeholder);
+  for (const order of data.orders) {
+    const option = document.createElement('option');
+    option.value = order.code;
+    const status = data.statuses[order.code] || 'draft';
+    option.textContent = `${order.code} · ${order.description} (${status})`;
+    select.append(option);
+  }
+  select.value = data.orders.some(order => order.code === selected) ? selected : '';
+  syncOrderStatus();
+}
+
+async function loadOrderStatuses() {
+  const revision = $('#repricing-revision').value;
+  const request = ++repricing.orderRequest;
+  $('#repricing-order-status-note').textContent = '';
+  repriceError('#repricing-order-error');
+  renderOrderStatuses({ statuses: {}, orders: [] });
+  if (!revision) return;
+  $('#repricing-order-status-note').textContent = 'Loading order statuses…';
+  try {
+    const data = await fetchJSON(`/api/purchase-order-statuses?revision=${encodeURIComponent(revision)}`);
+    if (request !== repricing.orderRequest) return;
+    renderOrderStatuses(data);
+    $('#repricing-order-status-note').textContent = `Order statuses for revision ${revision}.`;
+  } catch (error) {
+    if (request !== repricing.orderRequest) return;
+    $('#repricing-order-status-note').textContent = '';
+    repriceError('#repricing-order-error', error.message);
+  }
+}
+
+async function saveOrderStatus(event) {
+  event.preventDefault();
+  const revision = $('#repricing-revision').value;
+  const code = $('#repricing-order-code').value;
+  const status = $('#repricing-order-status').value;
+  if (!revision || !code || repricing.savingOrder) return;
+  const request = ++repricing.orderRequest;
+  repricing.savingOrder = true;
+  $('#repricing-order-code').disabled = true;
+  repriceError('#repricing-order-error');
+  syncOrderStatus(false);
+  setRepriceButton();
+  try {
+    const data = await postJSON('/api/purchase-order-statuses', { revision, code, status });
+    if (request !== repricing.orderRequest) return;
+    renderOrderStatuses(data, code);
+    $('#repricing-order-status-note').textContent = `Recorded ${code} as ${status} in revision ${revision}.`;
+    clearRepriceResult('Order status updated. Re-price the revision to refresh the draft POs and variations.');
+  } catch (error) {
+    if (request === repricing.orderRequest) repriceError('#repricing-order-error', error.message);
+  } finally {
+    repricing.savingOrder = false;
+    $('#repricing-order-code').disabled = false;
+    syncOrderStatus(false);
+    setRepriceButton();
+  }
 }
 
 async function buildHouse(event) {
@@ -1027,6 +1301,16 @@ $('#compare-before').addEventListener('change', selectedComparisonChanged);
 $('#compare-after').addEventListener('change', selectedComparisonChanged);
 $('#compare-button').addEventListener('click', compareSavedRevisions);
 document.querySelectorAll('[data-change-file]').forEach(link => link.addEventListener('click', event => { if (link.getAttribute('aria-disabled') === 'true') event.preventDefault(); }));
+$('#repricing-form').addEventListener('submit', repriceSavedRevision);
+$('#repricing-revision').addEventListener('change', repriceRevisionChanged);
+for (const id of ['#repricing-date', '#repricing-before']) $(id).addEventListener('input', () => clearRepriceResult());
+$('#surcharge-settings').addEventListener('toggle', () => { if ($('#surcharge-settings').open) void loadSurcharges(); });
+$('#surcharge-form').addEventListener('submit', saveSurcharge);
+for (const id of ['#surcharge-scope', '#surcharge-from', '#surcharge-type']) $(id).addEventListener('change', syncSurchargeForm);
+$('#repricing-order-settings').addEventListener('toggle', () => { if ($('#repricing-order-settings').open && !repricing.savingOrder) void loadOrderStatuses(); });
+$('#repricing-order-form').addEventListener('submit', saveOrderStatus);
+$('#repricing-order-code').addEventListener('change', () => syncOrderStatus());
+$('#repricing-order-status').addEventListener('change', () => syncOrderStatus(false));
 $('#add-pc-allowance').addEventListener('click', () => addAllowance('prime_cost'));
 $('#add-ps-allowance').addEventListener('click', () => addAllowance('provisional_sum'));
 fields.forEach(id => $(id).addEventListener('input', () => { updateSwatches(); syncRatePanelOverrides(); setDirty(); }));

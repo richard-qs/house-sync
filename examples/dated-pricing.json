@@ -1,0 +1,44 @@
+{
+  "rates": {
+    "FLOOR": {
+      "trade": "Concrete",
+      "supplier": "Example Concrete Supply",
+      "material_category": "Concrete",
+      "components": {"material": 45, "labour": 35, "plant": 10, "freight": 5}
+    },
+    "WALL": {
+      "trade": "Masonry",
+      "supplier": "Example Brick Supply",
+      "material_category": "Masonry",
+      "components": {"material": 235, "labour": 120, "plant": 15, "freight": 10}
+    },
+    "ROOF": {
+      "trade": "Roofing",
+      "supplier": "Example Steel Supply",
+      "material_category": "Steel",
+      "components": {"material": 85, "labour": 40, "plant": 10, "freight": 10},
+      "versions": [
+        {"effective_from": "2027-01-01", "components": {"material": 86}}
+      ]
+    }
+  },
+  "surcharges": [
+    {
+      "name": "Fuel levy Dec 2026",
+      "effective_from": "2026-12-01",
+      "end_date": "2026-12-31",
+      "type": "percentage",
+      "amount": 5,
+      "component": "freight",
+      "scope": {"type": "library"}
+    },
+    {
+      "name": "Steel surcharge",
+      "effective_from": "2026-12-01",
+      "type": "percentage",
+      "amount": 3,
+      "component": "material",
+      "scope": {"type": "material_category", "values": ["Steel"]}
+    }
+  ]
+}

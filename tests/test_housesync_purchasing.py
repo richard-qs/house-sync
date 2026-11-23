@@ -10,7 +10,7 @@ import pytest
 from reportlab import rl_config
 
 from housesync.engine import build_house
-from housesync.purchasing import purchase_order_pdf, purchase_orders_zip
+from housesync.purchasing import purchase_order_pdf, purchase_orders_zip, reprice_purchase_orders, repriced_purchase_orders_zip
 from housesync.schema import HouseSettings
 
 COMMERCIAL_FIELDS = {"buyer", "supplier", "delivery_site", "order_date", "required_by", "quote_reference", "notes", "prepared_by", "approved_by"}
@@ -187,3 +187,72 @@ def test_duplicate_saved_codes_are_rejected_instead_of_overwriting_orders(purcha
     result["boq"].append(deepcopy(result["boq"][0]))
     with pytest.raises(ValueError):
         purchase_orders_zip(result)
+
+
+@pytest.fixture
+def repriced_boq_snapshots():
+    saved = {
+        "revision": "a1b2c3",
+        "settings": {"project_name": "Repriced house"},
+        "totals": {"currency": "AUD"},
+        "boq": [
+            {"code": f"{room}_PAINT", "rate_code": "PAINT", "unit": "m2", "description": "Paint finish", "group_id": room,
+             "group_name": room, "gross_quantity": 10, "rate": 11.125, "amount": 111.25}
+            for room in ("STUDY", "LIVING", "KITCHEN", "HALL")
+        ],
+    }
+    repriced = {**deepcopy(saved), "price_as_at": "2026-12-01"}
+    for row, rate, amount in zip(repriced["boq"][:3], (12.25, 11.25, 10.25), (122.50, 112.50, 102.50), strict=True):
+        row.update(rate=rate, amount=amount, surcharges=[{"name": "Steel surcharge"}])
+    return saved, repriced
+
+
+def test_repricing_preserves_po_grouping_and_shows_line_and_total_differences(repriced_boq_snapshots):
+    saved, repriced = repriced_boq_snapshots
+    untouched = deepcopy((saved, repriced))
+    package = reprice_purchase_orders(saved, repriced)
+    assert [order["code"] for order in package["orders"]] == [row["code"] for row in saved["boq"]]
+    assert package["updated_count"] == 3
+    assert package["variations"] == []
+    order = package["orders"][0]
+    assert order["group_id"] == "STUDY"
+    line = order["lines"][0]
+    assert (line["quantity"], line["old_rate"], line["new_rate"]) == (10, 11.125, 12.25)
+    assert (line["old_amount"], line["new_amount"], line["difference"]) == (111.25, 122.50, 11.25)
+    assert line["surcharges"] == [{"name": "Steel surcharge"}]
+    assert order["totals"]["subtotal_ex_gst"] == {"old_amount": 111.25, "new_amount": 122.50, "difference": 11.25}
+    assert order["totals"]["gst_amount"] == {"old_amount": 11.13, "new_amount": 12.25, "difference": 1.12}
+    assert order["totals"]["total_incl_gst"] == {"old_amount": 122.38, "new_amount": 134.75, "difference": 12.37}
+
+    output = repriced_purchase_orders_zip(saved, repriced)
+    assert output == repriced_purchase_orders_zip(saved, repriced)
+    with ZipFile(BytesIO(output)) as zipped:
+        pdf = zipped.read("PO-a1b2c3-STUDY_PAINT.pdf")
+        assert _pdf_fields(pdf).keys() >= COMMERCIAL_FIELDS
+        text = _pdf_text(pdf)
+        for label in ("Line amount ex GST", "PO subtotal ex GST", "GST (10%)", "PO total incl GST", "Steel surcharge", "2026-12-01"):
+            assert label in text
+        _assert_numbers(text, 111.25, 122.50, 11.25, 122.38, 134.75, 12.37)
+    assert (saved, repriced) == untouched
+
+
+def test_issued_and_accepted_orders_get_separate_variations_only_for_price_differences(repriced_boq_snapshots):
+    saved, repriced = repriced_boq_snapshots
+    saved["purchase_order_statuses"] = {"LIVING_PAINT": "issued", "KITCHEN_PAINT": "accepted", "HALL_PAINT": "issued"}
+    package = reprice_purchase_orders(saved, repriced)
+    assert [order["code"] for order in package["orders"]] == ["STUDY_PAINT"]
+    assert package["updated_count"] == 1
+    assert package["variation_count"] == 2
+    assert {order["original_status"] for order in package["variations"]} == {"issued", "accepted"}
+    assert all(order["status"] == "draft" for order in package["variations"])
+    assert package["variations"][1]["totals"]["subtotal_ex_gst"]["difference"] == -8.75
+    with ZipFile(BytesIO(repriced_purchase_orders_zip(saved, repriced))) as zipped:
+        assert zipped.namelist() == [
+            "PO-a1b2c3-STUDY_PAINT.pdf",
+            "PO-a1b2c3-LIVING_PAINT-VAR-2026-12-01.pdf",
+            "PO-a1b2c3-KITCHEN_PAINT-VAR-2026-12-01.pdf",
+        ]
+        text = _pdf_text(zipped.read(zipped.namelist()[1]))
+        assert "DRAFT PURCHASE ORDER VARIATION" in text
+        assert "Original order: PO-a1b2c3-LIVING_PAINT (issued)" in text
+        assert "Original order remains in effect" in text
